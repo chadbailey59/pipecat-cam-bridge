@@ -50,9 +50,11 @@ async def main(room_url: str, token: str, session_logger=None):
         )
 
         # Initialize camera processor
-        camera_url = os.getenv("CAMERA_RTSP_URL")
+        camera_url = os.getenv("CAMERA_MJPEG_URL")
         if not camera_url:
-            log.error("CAMERA_RTSP_URL environment variable not set")
+            log.error(
+                "CAMERA_RTSP_URL or CAMERA_MJPEG_URL environment variable not set"
+            )
             return
 
         camera_processor = CameraProcessor(camera_url, log)
@@ -134,21 +136,21 @@ class CameraProcessor(FrameProcessor):
 
             # Convert frame to RGB and get raw bytes
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_bytes = cv2.imencode(".png", frame_rgb)[1].tobytes()
-            if ret:
-                cv2.imshow("MJPEG Stream", frame)
+            # frame_bytes = cv2.imencode(".png", frame_bytes)[1].tobytes()
+            frame_bytes = frame_rgb.tobytes()
+            # if ret:
+            #     cv2.imshow("MJPEG Stream", frame)
 
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-            else:
-                print("Failed to read frame")
-                break
-            # Create an OutputImageRawFrame
+            #     if cv2.waitKey(1) & 0xFF == ord("q"):
+            #         break
+            # else:
+            #     print("Failed to read frame")
+            #     break
+
             image_frame = OutputImageRawFrame(
                 image=frame_bytes, size=(frame.shape[1], frame.shape[0]), format="png"
             )
 
-            # Push the frame downstream
             await self.push_frame(image_frame)
 
             # Small delay to control frame rate
