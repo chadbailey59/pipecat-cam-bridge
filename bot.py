@@ -8,38 +8,30 @@ import asyncio
 import os
 
 import aiohttp
-import cv2
 from dotenv import load_dotenv
 from loguru import logger
-from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
-    Frame,
-    OutputImageRawFrame,
-    StartFrame,
-    SystemFrame,
-)
-from pipecat.pipeline.pipeline import FrameProcessor, Pipeline
+from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import FrameDirection, PipelineParams, PipelineTask
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.gstreamer.pipeline_source import GStreamerPipelineSource
 from pipecat.processors.logger import FrameLogger
 from pipecat.transports.services.daily import DailyParams, DailyTransport
-
+from pipecatcloud.agent import DailySessionArguments
 load_dotenv(override=True)
 
 
-async def main(room_url: str, token: str, session_logger=None):
-    log = session_logger or logger
+async def main(args: DailySessionArguments):    
 
-    log.debug("Starting bot in room: {}", room_url)
+    logger.debug("Starting bot in room: {}", args.room_url)
 
     async with aiohttp.ClientSession() as session:
         transport = DailyTransport(
-            room_url,
-            token,
+            args.room_url,
+            args.token,
             "bot",
             DailyParams(
                 audio_out_enabled=True,
+                audio_out_is_live=True,
                 camera_out_enabled=True,
                 camera_out_is_live=True,
                 camera_out_width=1280,
@@ -48,20 +40,28 @@ async def main(room_url: str, token: str, session_logger=None):
                 vad_enabled=False,
             ),
         )
+        # camera_processor = CameraProcessor(camera_url, log)
+        """
+        gst = GStreamerPipelineSource(
+            # pipeline='videotestsrc ! capsfilter caps="video/x-raw,width=1280,height=720,framerate=30/1"',
+            pipeline=f"rtspsrc location={os.getenv("CAMERA_RTSP_URL")} latency=0",
+            # pipeline=f"rtspsrc location={os.getenv("CAMERA_RTSP_URL")} latency=0 buffer-mode=auto ! rtpjitterbuffer ! rtph264depay ! avdec_h264 ! videoconvert ! video/x-raw,width=1280,height=720 ! autovideosink",
+            out_params=GStreamerPipelineSource.OutputParams(
+                video_width=1280,
+                video_height=720,
+            ),
+        )
+        """
 
-        # Initialize camera processor
-        camera_url = os.getenv("CAMERA_MJPEG_URL")
-        if not camera_url:
-            log.error(
-                "CAMERA_RTSP_URL or CAMERA_MJPEG_URL environment variable not set"
-            )
-            return
+        gst = GStreamerPipelineSource(
+            pipeline=f"rtspsrc location={os.getenv('CAMERA_RTSP_URL')} latency=0 ! rtph264depay ! decodebin ! videoconvert ! video/x-raw,format=RGB ! appsink name=appsink sync=false"
+        )
 
-        camera_processor = CameraProcessor(camera_url, log)
         fl = FrameLogger("After camera processor")
         pipeline = Pipeline(
             [
-                camera_processor,
+                # camera_processor,
+                gst,
                 # fl,
                 transport.output(),
             ]
@@ -79,11 +79,11 @@ async def main(room_url: str, token: str, session_logger=None):
 
         @transport.event_handler("on_first_participant_joined")
         async def on_first_participant_joined(transport, participant):
-            log.info("First participant joined: {}", participant["id"])
+            logger.info("First participant joined: {}", participant["id"])
 
         @transport.event_handler("on_participant_left")
         async def on_participant_left(transport, participant, reason):
-            log.info("Participant left: {}", participant)
+            logger.info("Participant left: {}", participant)
             await task.cancel()
 
         # Start the camera capture task before running the pipeline
@@ -94,91 +94,7 @@ async def main(room_url: str, token: str, session_logger=None):
         await runner.run(task)
 
 
-class CameraProcessor(FrameProcessor):
-    def __init__(self, camera_url: str, logger=None):
-        super().__init__(name="CameraProcessor")
-        self.camera_url = camera_url
-        self.log = logger or logger.getLogger(__name__)
-        self.cap = None
-        self._capture_task = None
-        self._running = False
-
-    async def _start(self):
-        """Start the camera capture task."""
-        print("camera capture start")
-        if self._capture_task is not None:
-            self.log.warning("Camera capture task is already running")
-            return
-
-        await self.setup()
-        self._running = True
-        self._capture_task = self.create_task(self._capture_frames())
-        self.log.info("Started camera capture task")
-
-    async def setup(self):
-        """Initialize the camera capture."""
-        self.log.info(f"Initializing camera capture from {self.camera_url}")
-        self.cap = cv2.VideoCapture(self.camera_url)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open camera stream at {self.camera_url}")
-
-    async def _capture_frames(self):
-        """Continuous task to capture and process frames."""
-        while self._running:
-            if not self.cap:
-                await self.setup()
-
-            ret, frame = self.cap.read()
-            if not ret:
-                self.log.warning("Failed to read frame from camera")
-                await asyncio.sleep(0.1)  # Short delay before retrying
-                continue
-
-            # Convert frame to RGB and get raw bytes
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # frame_bytes = cv2.imencode(".png", frame_bytes)[1].tobytes()
-            frame_bytes = frame_rgb.tobytes()
-            # if ret:
-            #     cv2.imshow("MJPEG Stream", frame)
-
-            #     if cv2.waitKey(1) & 0xFF == ord("q"):
-            #         break
-            # else:
-            #     print("Failed to read frame")
-            #     break
-
-            image_frame = OutputImageRawFrame(
-                image=frame_bytes, size=(frame.shape[1], frame.shape[0]), format="png"
-            )
-
-            await self.push_frame(image_frame)
-
-            # Small delay to control frame rate
-            await asyncio.sleep(1 / 30)  # 30 FPS
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        """Process incoming frames. This processor mainly handles frame output via the capture task."""
-        await super().process_frame(frame, direction)
-        if isinstance(frame, SystemFrame):
-            if isinstance(frame, StartFrame):
-                await self._start()
-            if isinstance(frame, (EndFrame, CancelFrame)):
-                await self._stop()
-        await self.push_frame(frame, direction)
-
-    async def _stop(self):
-        """Clean up resources and stop the capture task."""
-        self._running = False
-        if self._capture_task:
-            await self.cancel_task(self._capture_task)
-            self._capture_task = None
-
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-
-
-async def bot(config, room_url: str, token: str, session_id=None, session_logger=None):
+async def bot(args: DailySessionArguments):
     """Main bot entry point compatible with the FastAPI route handler.
 
     Args:
@@ -188,15 +104,14 @@ async def bot(config, room_url: str, token: str, session_id=None, session_logger
         session_id: The session ID for logging
         session_logger: The session-specific logger
     """
-    log = session_logger or logger
-    log.info(f"Bot process initialized {room_url} {token}")
-    log.info(f"Bot config {config}")
+    logger.info(f"Bot process initialized {args.room_url} {args.token}")
+    logger.info(f"Bot config {args}")
 
     try:
-        await main(room_url, token, session_logger)
-        log.info("Bot process completed")
+        await main(args)
+        logger.info("Bot process completed")
     except Exception as e:
-        log.exception(f"Error in bot process: {str(e)}")
+        logger.exception(f"Error in bot process: {str(e)}")
         raise
 
 
@@ -218,8 +133,9 @@ async def local_main():
         logger.warning(f"Talk to your voice agent here: {room_url}")
         logger.warning("_")
         logger.warning("_")
+        args = DailySessionArguments(room_url=room_url, token=token, session_id=None, body=None)
         # webbrowser.open(room_url)
-        await main(room_url, token)
+        await main(args)
 
 
 if LOCAL_RUN and __name__ == "__main__":
