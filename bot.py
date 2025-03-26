@@ -85,8 +85,7 @@ async def bot(args: DailySessionArguments):
         session_id: The session ID for logging
         session_logger: The session-specific logger
     """
-    logger.info(f"Bot process initialized {args.room_url} {args.token}")
-    logger.info(f"Bot config {args}")
+    logger.info(f"Bot process initialized. args: {args}")
 
     try:
         await main(args)
